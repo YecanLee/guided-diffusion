@@ -18,6 +18,23 @@ from guided_diffusion.script_util import (
 )
 
 
+def create_argparser():
+    defaults = dict(
+        clip_denoised=True,
+        num_samples_per_class=51,
+        batch_size=16,
+        use_ddim=False,
+        model_path="",
+        classifier_path="",
+        classifier_scale=1.0,
+    )
+    defaults.update(model_and_diffusion_defaults())
+    defaults.update(classifier_defaults())
+    parser = argparse.ArgumentParser()
+    add_dict_to_argparser(parser, defaults)
+    return parser
+
+
 def main():
     args = create_argparser().parse_args()
 
@@ -32,6 +49,8 @@ def main():
         dist_util.load_state_dict(args.model_path, map_location="cpu")
     )
     model.to(dist_util.dev())
+    # need to be tested if this is really faster than before
+    model = th.compile(model)
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
@@ -63,7 +82,7 @@ def main():
     all_images = []
     all_labels = []
 
-    with th.no_grad():
+    with th.inference_mode():
         for class_label in range(NUM_CLASSES):
             class_images = []
             while len(class_images) < args.num_samples_per_class:
@@ -94,33 +113,16 @@ def main():
             all_labels.extend([class_label] * args.num_samples_per_class)
             logger.log(f"created {len(class_images)} samples for class {class_label}")
 
-    arr = np.concatenate(all_images, axis=0)
-    label_arr = np.array(all_labels)
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        np.savez(out_path, arr, label_arr)
+            # save all images to a folder, save them seperately
+            if dist.get_rank() == 0:
+                out_dir = os.path.join(logger.get_dir(), "generated_samples")
+                os.makedirs(out_dir, exist_ok=True)
+                for i in range(len(all_images)):
+                    save_path = os.path.join(out_dir, f"{i:06d}.png")
+                    th.save(all_images[i], save_path)
 
     dist.barrier()
     logger.log("sampling complete")
-
-
-def create_argparser():
-    defaults = dict(
-        clip_denoised=True,
-        num_samples_per_class=51,
-        batch_size=16,
-        use_ddim=False,
-        model_path="",
-        classifier_path="",
-        classifier_scale=1.0,
-    )
-    defaults.update(model_and_diffusion_defaults())
-    defaults.update(classifier_defaults())
-    parser = argparse.ArgumentParser()
-    add_dict_to_argparser(parser, defaults)
-    return parser
 
 
 if __name__ == "__main__":
